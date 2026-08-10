@@ -1,0 +1,24 @@
+---
+# Bắt đầu trực tiếp bằng các task, KHÔNG khai báo hosts hay gather_facts ở đây
+- name: Ensure Computer Name matches 'hostname' variable
+  ansible.windows.win_hostname:
+    name: "{{ hostname }}"
+  register: res_hostname
+
+- name: Reboot Windows Server if computer name changed
+  ansible.windows.win_reboot:
+    msg: "Ansible is rebooting the server after renaming computer to {{ hostname }}"
+    pre_reboot_delay: 5
+    post_reboot_delay: 15
+    reboot_timeout: 600
+  when: res_hostname.reboot_required
+
+- name: Verify current computer name after change
+  ansible.windows.win_powershell:
+    script: |
+      [System.Environment]::MachineName
+  register: current_name
+
+- name: Display updated Computer Name
+  ansible.builtin.debug:
+    msg: "Computer Name is now successfully set to: {{ current_name.output[0] }}"

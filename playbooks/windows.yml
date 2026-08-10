@@ -1,0 +1,7 @@
+---
+- name: Run Windows Setup Roles
+  hosts: all
+  gather_facts: yes
+
+  roles:
+    - windows   # Ansible sẽ tự động vào roles/set_hostname/tasks/main.yml để chạy

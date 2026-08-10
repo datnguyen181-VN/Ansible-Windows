@@ -1,0 +1,117 @@
+---
+# 1. Tự động xác định trạng thái Pre hoặc Post
+- name: Determine current check phase for Windows (Pre or Post)
+  ansible.builtin.set_fact:
+    current_phase: "{{ report_phase | default('pre') }}"
+
+# 2. Thu thập Facts cơ bản của Windows
+- name: Collect Windows system facts
+  ansible.builtin.setup:
+
+# 3. Thu thập thông tin Domain / Workgroup / Real IPv4 / Subnet Mask / Gateway / DNS
+- name: Get Domain, Network & User Status
+  ansible.windows.win_shell: |
+    $sysInfo = Get-CimInstance -ClassName Win32_ComputerSystem
+    $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    
+    # Lấy thông tin Card mạng IPv4 chính
+    $netIP = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.IPAddress -notlike "169.254*" -and $_.IPAddress -notlike "127.0.0.1"} | Select-Object -First 1
+    
+    $ipv4 = $netIP.IPAddress
+    $prefixLength = $netIP.PrefixLength
+    
+    # Hàm chuyển đổi PrefixLength (/24) sang Subnet Mask (255.255.255.0)
+    if ($prefixLength) {
+        $maskBytes = [Math]::Floor($prefixLength / 8)
+        $remainder = $prefixLength % 8
+        $bytes = @(0,0,0,0)
+        for ($i = 0; $i -lt $maskBytes; $i++) { $bytes[$i] = 255 }
+        if ($remainder -gt 0) { $bytes[$maskBytes] = 256 - [Math]::Pow(2, (8 - $remainder)) }
+        $subnetMask = $bytes -join '.'
+    } else {
+        $subnetMask = "N/A"
+    }
+    
+    # Lấy Default Gateway
+    $gateway = (Get-NetRoute -AddressFamily IPv4 -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
+    
+    # Lấy Danh sách DNS Server
+    $dns = (Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.ServerAddresses}).ServerAddresses -join ", "
+
+    [PSCustomObject]@{
+        PartOfDomain       = $sysInfo.PartOfDomain
+        DomainOrWorkgroup  = if ($sysInfo.PartOfDomain) { $sysInfo.Domain } else { $sysInfo.Workgroup }
+        ExecutingUser      = $currentUser
+        RealIPv4           = if ($ipv4) { $ipv4 } else { "N/A" }
+        SubnetMask         = $subnetMask
+        DefaultGateway     = if ($gateway) { $gateway } else { "N/A" }
+        DNSServers         = if ($dns) { $dns } else { "N/A" }
+    } | ConvertTo-Json
+  register: win_domain_raw
+
+- name: Parse Domain Info JSON
+  ansible.builtin.set_fact:
+    win_domain_info: "{{ win_domain_raw.stdout | from_json }}"
+
+# 4. Đảm bảo thư mục reports luôn tồn tại trên Control Node
+- name: Ensure reports directory exists on Control Node
+  ansible.builtin.file:
+    path: "./reports"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  run_once: true
+
+# 5. Xóa file báo cáo cũ NẾU chưa bị xóa (Chỉ chạy 1 lần duy nhất ở host đầu tiên cho mỗi phase)
+- name: Remove existing report file for current phase if present
+  ansible.builtin.file:
+    path: "./reports/win_{{ current_phase }}_check_summary_{{ ansible_date_time.date }}.txt"
+    state: absent
+  delegate_to: localhost
+  run_once: true
+  when: hostvars['localhost']['win_report_cleaned_' + current_phase] is undefined
+
+# 6. Đánh dấu đã dọn dẹp file cũ cho lượt chạy hiện tại
+- name: Mark report file as cleaned for current phase
+  ansible.builtin.set_fact:
+    "win_report_cleaned_{{ current_phase }}": true
+  delegate_to: localhost
+  delegate_facts: true
+  run_once: true
+
+# 7. Ghi nối (Append) thông tin từng Windows Node vào file báo cáo
+- name: Append Windows node information into consolidated report
+  ansible.builtin.blockinfile:
+    path: "./reports/win_{{ current_phase }}_check_summary_{{ ansible_date_time.date }}.txt"
+    create: yes
+    insertafter: EOF
+    marker: ""
+    block: |
+      ================================================================================
+      TARGET WINDOWS HOST : {{ ansible_hostname }} ({{ win_domain_info.RealIPv4 | default(ansible_host | default('N/A')) }})
+      REPORT TYPE         : {{ current_phase | upper }} CHECK
+      ================================================================================
+
+      1. HOSTNAME
+         - Current Hostname : {{ ansible_hostname }}
+         - Computer Name    : {{ ansible_computername | default(ansible_hostname) }}
+
+      2. IP ADDRESSES
+         - Default IPv4 Address : {{ win_domain_info.RealIPv4 }}
+         - Subnet Mask          : {{ win_domain_info.SubnetMask }}
+         - Default Gateway      : {{ win_domain_info.DefaultGateway }}
+         - DNS Servers          : {{ win_domain_info.DNSServers }}
+         - Ansible Host (Inventory): {{ ansible_host | default('N/A') }}
+
+      3. DOMAIN / WORKGROUP & USER STATUS
+         - Joined Domain    : {{ 'Yes' if win_domain_info.PartOfDomain else 'No (Workgroup)' }}
+         - Domain/Workgroup : {{ win_domain_info.DomainOrWorkgroup }}
+         - Executing User   : {{ win_domain_info.ExecutingUser }}
+
+  delegate_to: localhost
+  throttle: 1
+
+# 8. Chuyển cờ trạng thái sang 'post' cho lần gọi tiếp theo
+- name: Update report phase flag to post
+  ansible.builtin.set_fact:
+    report_phase: "post"

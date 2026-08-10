@@ -1,0 +1,16 @@
+---
+# tasks/update_hostvars.yml
+
+- name: Update host_vars file for the current Windows host
+  ansible.builtin.command:
+    cmd: python3 /root/ansible-os-automation/update_hostvars.py
+  delegate_to: localhost
+  run_once: true
+  register: script_output
+  changed_when: "'[OK]' in script_output.stdout"
+
+- name: Display script output
+  ansible.builtin.debug:
+    msg: "{{ script_output.stdout_lines }}"
+  delegate_to: localhost
+  run_once: true

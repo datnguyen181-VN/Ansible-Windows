@@ -1,0 +1,7 @@
+- import_tasks: collect_info_Windows.yml
+- import_tasks: changehostname.yml
+- import_tasks: changepassword.yml
+- import_tasks: changeip.yml
+- import_tasks: update_hostvars.yml
+- import_tasks: join_domain.yml
+- import_tasks: collect_info_Windows.yml

@@ -1,0 +1,25 @@
+# Ansible
+*.retry
+*.log
+
+# Inventory chứa IP/password/secret
+hosts.ini
+inventory.ini
+hosts
+inventory/
+
+# Secrets
+*.vault
+vault_pass*
+secrets/
+*.secret
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db

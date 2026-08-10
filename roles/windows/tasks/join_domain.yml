@@ -1,0 +1,36 @@
+---
+# 1. Cấu hình DNS Server trỏ về Domain Controller
+- name: Set Primary DNS Server for Windows
+  ansible.windows.win_dns_client:
+    adapter_names: '*'
+    dns_servers:
+      - "{{ dns }}"
+
+# 2. Thực hiện Join Domain vào svtech.local (Đã sửa định dạng User AD)
+- name: Join Windows Server to Active Directory Domain
+  microsoft.ad.membership:
+    dns_domain_name: "{{ domain }}"
+    domain_admin_user: "{{ user_ad }}@{{ domain }}"
+    domain_admin_password: "{{ password_ad }}"
+    state: domain
+  register: res_domain
+
+# 3. Khởi động lại Windows Server nếu có yêu cầu sau khi Join Domain
+- name: Reboot Windows Server after Domain Join
+  ansible.windows.win_reboot:
+    msg: "Ansible is rebooting the server after joining domain {{ domain }}"
+    pre_reboot_delay: 5
+    post_reboot_delay: 15
+    reboot_timeout: 600
+  when: res_domain.reboot_required
+
+# 4. Kiểm tra trạng thái Domain sau khi reboot
+- name: Verify Domain status
+  ansible.windows.win_powershell:
+    script: |
+      (Get-CimInstance -ClassName Win32_ComputerSystem).Domain
+  register: current_domain
+
+- name: Display current Domain
+  ansible.builtin.debug:
+    msg: "Computer is now successfully joined to Domain: {{ current_domain.output[0] }}"

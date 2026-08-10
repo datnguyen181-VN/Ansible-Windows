@@ -1,0 +1,71 @@
+# 1. Tự động tìm tên Network Adapter đang active có kết nối Gateway
+- name: Get active Network Adapter name
+  ansible.windows.win_powershell:
+    script: |
+      (Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -First 1 -ExpandProperty InterfaceAlias)
+  register: active_adapter
+
+# 2. Cấu hình DNS Server
+- name: Configure Static DNS Server
+  ansible.windows.win_dns_client:
+    adapter_names: "{{ active_adapter.output[0] }}"
+    dns_servers:
+      - "{{ dns }}"
+
+# 3. Đổi IP Tĩnh, Subnet Mask, Gateway bằng Scheduled Task (Chạy ẩn dưới quyền SYSTEM)
+- name: Schedule IP Address Change via Background Task
+  ansible.windows.win_powershell:
+    script: |
+      $adapterAlias = "{{ active_adapter.output[0] }}"
+      $newIP = "{{ ip_new }}"
+      $gateway = "{{ gateway }}"
+      
+      $adapter = Get-NetAdapter -Name $adapterAlias
+      $currentIP = (Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).IPAddress
+
+      if ($currentIP -ne $newIP) {
+          $taskName = "Ansible_Change_IP"
+          $ifIndex = $adapter.ifIndex
+          
+          # Ghép chuỗi PowerShell Script chạy độc lập ở background
+          $scriptBody = "Start-Sleep -Seconds 3; " +
+                        "Remove-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -Confirm:`$false -ErrorAction SilentlyContinue; " +
+                        "Remove-NetRoute -InterfaceIndex $ifIndex -AddressFamily IPv4 -Confirm:`$false -ErrorAction SilentlyContinue; " +
+                        "New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress '$newIP' -PrefixLength 24 -DefaultGateway '$gateway' -ErrorAction SilentlyContinue; " +
+                        "Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false -ErrorAction SilentlyContinue"
+          
+          # Encode script sang Base64 để tránh lỗi ký tự đặc biệt
+          $bytes = [System.Text.Encoding]::Unicode.GetBytes($scriptBody)
+          $encodedScript = [Convert]::ToBase64String($bytes)
+          
+          $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -EncodedCommand $encodedScript"
+          $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+          
+          # Tạo và Kích hoạt Task ngay lập tức
+          Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
+          Start-ScheduledTask -TaskName $taskName
+      }
+
+# 4. Cập nhật IP mới trên Ansible Control Node
+- name: Update ansible_host to new IP dynamically
+  ansible.builtin.set_fact:
+    ansible_host: "{{ ip_new }}"
+
+# 5. Chờ kết nối WinRM lắng nghe trở lại tại IP mới
+- name: Wait for WinRM connection to respond on new IP
+  ansible.builtin.wait_for_connection:
+    delay: 10
+    connect_timeout: 10
+    sleep: 5
+    timeout: 180
+
+# 6. Kiểm tra lại cấu hình IP mới sau khi reconnect thành công
+- name: Verify updated IP configuration
+  ansible.windows.win_powershell:
+    script: |
+      (Get-NetIPAddress -InterfaceAlias "{{ active_adapter.output[0] }}" -AddressFamily IPv4).IPAddress
+  register: verify_ip
+
+- name: Display new IP Address
+  ansible.builtin.debug:
+    msg: "Windows Server network IP successfully changed to: {{ verify_ip.output[0] }}"
